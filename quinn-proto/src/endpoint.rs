@@ -8,10 +8,7 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use rand::{
-    Rng, RngExt, SeedableRng,
-    rngs::{StdRng, SysRng},
-};
+use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 use rustc_hash::FxHashMap;
 use slab::Slab;
 use thiserror::Error;
@@ -20,7 +17,7 @@ use tracing::{debug, error, trace, warn};
 use crate::{
     Duration, INITIAL_MTU, Instant, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE, ResetToken,
     Side, Transmit, TransportConfig, TransportError,
-    cid_generator::ConnectionIdGenerator,
+    cid_generator::{ConnectionIdGenerator, HashedConnectionIdGenerator},
     coding::BufMutExt,
     config::{ClientConfig, EndpointConfig, ServerConfig},
     connection::{Connection, ConnectionArgs, ConnectionError, SideArgs},
@@ -65,28 +62,46 @@ impl Endpoint {
     /// better performance. This requires that outgoing packets are never fragmented, which can be
     /// achieved via e.g. the `IPV6_DONTFRAG` socket option.
     ///
-    /// Returns an error if the endpoint cannot be seeded from the operating system random source.
+    /// Returns an error if no entropy source is configured or the configured source fails.
+    /// An explicit [`EndpointConfig::rng_seed`] bypasses the entropy source.
     pub fn new(
         config: Arc<EndpointConfig>,
         server_config: Option<Arc<ServerConfig>>,
         allow_mtud: bool,
-    ) -> Self {
-        Self {
-            rng: match config.rng_seed {
-                Some(seed) => StdRng::from_seed(seed),
-                None => StdRng::try_from_rng(&mut SysRng)
-                    .expect("failed to seed random number generator from system"),
-            },
+    ) -> Result<Self, crypto::GetRandomFailed> {
+        let rng_seed = match config.rng_seed {
+            Some(seed) => seed,
+            None => {
+                let mut seed = [0; 32];
+                match config.random_source.as_deref() {
+                    Some(source) => source.fill(&mut seed),
+                    #[cfg(feature = "system-rng")]
+                    None => crypto::SecureRandom::fill(&crypto::SystemRandom, &mut seed),
+                    #[cfg(not(feature = "system-rng"))]
+                    None => Err(crypto::GetRandomFailed),
+                }?;
+                seed
+            }
+        };
+        let mut rng = StdRng::from_seed(rng_seed);
+        let local_cid_generator = match &config.connection_id_generator_factory {
+            Some(factory) => factory(),
+            None => Box::new(HashedConnectionIdGenerator::from_rng(StdRng::from_rng(
+                &mut rng,
+            ))),
+        };
+        Ok(Self {
+            rng,
             index: ConnectionIndex::default(),
             connections: Slab::new(),
-            local_cid_generator: (config.connection_id_generator_factory.as_ref())(),
+            local_cid_generator,
             config,
             server_config,
             allow_mtud,
             last_stateless_reset: None,
             incoming_buffers: Slab::new(),
             all_incoming_buffers_total_bytes: 0,
-        }
+        })
     }
 
     /// Replace the server configuration, affecting new incoming connections only
@@ -348,7 +363,14 @@ impl Endpoint {
             return Err(ConnectError::UnsupportedVersion);
         }
 
-        let remote_id = (config.initial_dst_cid_provider)();
+        let remote_id = match &config.initial_dst_cid_provider {
+            Some(provider) => provider(),
+            None => {
+                let mut bytes = [0; MAX_CID_SIZE];
+                self.rng.fill_bytes(&mut bytes);
+                ConnectionId::new(&bytes)
+            }
+        };
         trace!(initial_dcid = %remote_id);
 
         let ch = ConnectionHandle(self.connections.vacant_key());
@@ -1616,4 +1638,108 @@ struct FourTuple {
     remote: SocketAddr,
     // A single socket can only listen on a single port, so no need to store it explicitly
     local_ip: Option<IpAddr>,
+}
+
+#[cfg(test)]
+mod entropy_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    use super::*;
+    use crate::crypto::{CryptoError, GetRandomFailed, HmacKey, SecureRandom};
+
+    // Endpoint construction does not use the reset key; these methods must not be reached.
+    struct UnusedResetKey;
+    impl HmacKey for UnusedResetKey {
+        fn sign(&self, _: &[u8], _: &mut [u8]) {
+            unreachable!("reset key used during endpoint construction")
+        }
+        fn signature_len(&self) -> usize {
+            32
+        }
+        fn verify(&self, _: &[u8], _: &[u8]) -> Result<(), CryptoError> {
+            unreachable!("reset key used during endpoint construction")
+        }
+    }
+
+    struct Source {
+        calls: AtomicUsize,
+        failing: bool,
+    }
+    impl SecureRandom for Source {
+        fn fill(&self, output: &mut [u8]) -> Result<(), GetRandomFailed> {
+            assert_eq!(output.len(), 32);
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            output.fill(23 + u8::try_from(call).unwrap());
+            if self.failing {
+                return Err(GetRandomFailed);
+            }
+            Ok(())
+        }
+    }
+
+    fn config() -> EndpointConfig {
+        EndpointConfig::new(Arc::new(UnusedResetKey))
+    }
+
+    #[test]
+    fn configured_entropy_and_explicit_seed_select_the_same_stream() {
+        let source = Arc::new(Source {
+            calls: AtomicUsize::new(0),
+            failing: false,
+        });
+        let mut cfg = config();
+        cfg.random_source(source.clone());
+        let cfg = Arc::new(cfg);
+        let mut first = Endpoint::new(cfg.clone(), None, true).unwrap();
+        let mut second = Endpoint::new(cfg, None, true).unwrap();
+        assert_eq!(source.calls.load(Ordering::Relaxed), 2);
+
+        let failing = Arc::new(Source {
+            calls: AtomicUsize::new(0),
+            failing: true,
+        });
+        let mut seeded = config();
+        seeded
+            .random_source(failing.clone())
+            .rng_seed(Some([23; 32]));
+        let mut seeded = Endpoint::new(Arc::new(seeded), None, true).unwrap();
+        assert_eq!(failing.calls.load(Ordering::Relaxed), 0);
+
+        for _ in 0..4 {
+            assert_eq!(
+                first.local_cid_generator.generate_cid(),
+                seeded.local_cid_generator.generate_cid()
+            );
+            assert_eq!(first.rng.random::<u64>(), seeded.rng.random::<u64>());
+        }
+        assert_ne!(first.rng.random::<u64>(), second.rng.random::<u64>());
+    }
+
+    #[test]
+    fn entropy_failure_does_not_fall_back_or_construct_a_cid_generator() {
+        let source = Arc::new(Source {
+            calls: AtomicUsize::new(0),
+            failing: true,
+        });
+        let mut cfg = config();
+        cfg.random_source(source.clone());
+        cfg.cid_generator(Arc::new(|| panic!("CID factory ran after entropy failure")));
+        assert!(matches!(
+            Endpoint::new(Arc::new(cfg), None, true),
+            Err(GetRandomFailed)
+        ));
+        assert_eq!(source.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(not(feature = "system-rng"))]
+    #[test]
+    fn missing_entropy_is_reported() {
+        assert!(matches!(
+            Endpoint::new(Arc::new(config()), None, true),
+            Err(GetRandomFailed)
+        ));
+    }
 }

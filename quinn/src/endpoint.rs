@@ -170,7 +170,8 @@ impl Endpoint {
         let allow_mtud = !socket.may_fragment();
         let rc = EndpointRef::new(
             socket,
-            proto::Endpoint::new(Arc::new(config), server_config.map(Arc::new), allow_mtud),
+            proto::Endpoint::new(Arc::new(config), server_config.map(Arc::new), allow_mtud)
+                .map_err(io::Error::other)?,
             addr.is_ipv6(),
             runtime.clone(),
         );
@@ -1045,7 +1046,7 @@ mod tests {
 
         for error in [io::ErrorKind::ConnectionReset.into(), size_error] {
             let mut endpoint =
-                proto::Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+                proto::Endpoint::new(Arc::new(EndpointConfig::default()), None, true).unwrap();
             let (tx, _rx) = mpsc::unbounded_channel();
             let mut state = RecvState::new(tx, 1, &endpoint);
             let now = Instant::now();

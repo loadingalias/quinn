@@ -1943,3 +1943,26 @@ unsafe fn drop_waker(data: *const ()) {
     // SAFETY: pointer always comes from `Arc::into_raw()` (see `raw_waker()`)
     drop(unsafe { Arc::<WakeCounter>::from_raw(data as *const WakeCounter) });
 }
+
+#[tokio::test]
+async fn endpoint_entropy_failure_is_returned_as_an_io_error() {
+    struct Failing;
+    impl proto::crypto::SecureRandom for Failing {
+        fn fill(&self, output: &mut [u8]) -> Result<(), proto::crypto::GetRandomFailed> {
+            output.fill(23);
+            Err(proto::crypto::GetRandomFailed)
+        }
+    }
+
+    let mut config = EndpointConfig::default();
+    config.random_source(Arc::new(Failing));
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let error = Endpoint::new(config, None, socket, Arc::new(TokioRuntime)).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert!(
+        error
+            .get_ref()
+            .unwrap()
+            .is::<proto::crypto::GetRandomFailed>()
+    );
+}

@@ -27,7 +27,7 @@ fn oversized_cached_initial_token() {
         config
             .token_store
             .insert("localhost", vec![0; token_len].into());
-        let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+        let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None, true).unwrap();
         let now = Instant::now();
         let (_, mut conn) = endpoint
             .connect(now, config, "[::1]:4433".parse().unwrap(), "localhost")
@@ -65,7 +65,7 @@ fn oversized_retry_token() {
         (1200, false),
     ] {
         let address = "[::1]:4433".parse().unwrap();
-        let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+        let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None, true).unwrap();
         let now = Instant::now();
         let (_, mut conn) = endpoint
             .connect(now, client_config(), address, "localhost")

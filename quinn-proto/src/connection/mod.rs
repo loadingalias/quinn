@@ -294,7 +294,7 @@ impl Connection {
                 now,
                 if pref_addr_cid.is_some() { 2 } else { 1 },
             ),
-            path: PathData::new(remote, allow_mtud, None, 0, now, &config),
+            path: PathData::new(remote, allow_mtud, None, 0, now, &config, &mut rng),
             path_counter: 0,
             allow_mtud,
             local_ip,
@@ -1460,7 +1460,7 @@ impl Connection {
     /// faster or reduce loss to settle on optimal values by restarting from the initial
     /// configuration in the [`TransportConfig`].
     pub fn path_changed(&mut self, now: Instant) {
-        self.path.reset(now, &self.config);
+        self.path.reset(now, &self.config, &mut self.rng);
         self.datagrams().drop_oversized();
     }
 
@@ -3246,6 +3246,7 @@ impl Connection {
                 self.path_counter,
                 now,
                 &self.config,
+                &mut self.rng,
             )
         };
         new_path.challenge = Some(self.rng.random());
@@ -4345,7 +4346,7 @@ mod tests {
                 .token_store
                 .insert("localhost", vec![0; token_len].into());
             let mut endpoint =
-                crate::Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+                crate::Endpoint::new(Arc::new(EndpointConfig::default()), None, true).unwrap();
             let now = Instant::now();
             let (_, mut conn) = endpoint
                 .connect(

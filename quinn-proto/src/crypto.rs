@@ -24,6 +24,37 @@ pub(crate) mod ring_like;
 #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
 pub mod rustls;
 
+/// A source of cryptographically secure random bytes for seeding transport generators.
+///
+/// The source must fill the entire output or return an error. Predictable test sources must not
+/// be used in production. Quinn retains its own PRNG and derives connection and BBR seeds from it.
+pub trait SecureRandom: Send + Sync {
+    /// Fill `output` with random bytes, or fail without falling back to another source.
+    fn fill(&self, output: &mut [u8]) -> Result<(), GetRandomFailed>;
+}
+
+/// Failed to obtain random bytes from the configured entropy source.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct GetRandomFailed;
+
+impl std::fmt::Display for GetRandomFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("failed to get random bytes")
+    }
+}
+
+impl std::error::Error for GetRandomFailed {}
+
+#[cfg(feature = "system-rng")]
+pub(crate) struct SystemRandom;
+
+#[cfg(feature = "system-rng")]
+impl SecureRandom for SystemRandom {
+    fn fill(&self, output: &mut [u8]) -> Result<(), GetRandomFailed> {
+        rand::TryRng::try_fill_bytes(&mut rand::rngs::SysRng, output).map_err(|_| GetRandomFailed)
+    }
+}
+
 /// A cryptographic session (commonly TLS)
 pub trait Session: Send + Sync + 'static {
     /// Create the initial set of keys given the client's initial destination ConnectionId

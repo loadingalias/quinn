@@ -36,6 +36,7 @@ use crate::{
 mod util;
 use util::*;
 
+mod rng;
 mod token;
 
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
@@ -115,7 +116,8 @@ fn pending_incoming_can_retry_after_disabling_server() {
 fn version_negotiate_server() {
     let _guard = subscribe();
     let client_addr = "[::2]:7890".parse().unwrap();
-    let mut server = Endpoint::new(Default::default(), Some(Arc::new(server_config())), true);
+    let mut server =
+        Endpoint::new(Default::default(), Some(Arc::new(server_config())), true).unwrap();
     let now = Instant::now();
     let mut buf = Vec::with_capacity(server.config().get_max_udp_payload_size() as usize);
     // Long-header packet with reserved version number
@@ -150,12 +152,13 @@ fn version_negotiate_client() {
         || Box::new(RandomConnectionIdGenerator::new(0));
     let mut client = Endpoint::new(
         Arc::new(EndpointConfig {
-            connection_id_generator_factory: Arc::new(cid_generator_factory),
+            connection_id_generator_factory: Some(Arc::new(cid_generator_factory)),
             ..Default::default()
         }),
         None,
         true,
-    );
+    )
+    .unwrap();
     let (_, mut client_ch) = client
         .connect(Instant::now(), client_config(), server_addr, "localhost")
         .unwrap();
@@ -266,6 +269,7 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
             self: Arc<Self>,
             _now: Instant,
             _current_mtu: u16,
+            _rng: &mut dyn Rng,
         ) -> Box<dyn congestion::Controller> {
             Box::new(TestController)
         }
@@ -335,7 +339,8 @@ fn server_stateless_reset() {
     let mut pair = Pair::new(endpoint_config.clone(), server_config());
     let (client_ch, _) = pair.connect();
     pair.drive(); // Flush any post-handshake frames
-    pair.server.endpoint = Endpoint::new(endpoint_config, Some(Arc::new(server_config())), true);
+    pair.server.endpoint =
+        Endpoint::new(endpoint_config, Some(Arc::new(server_config())), true).unwrap();
     // Force the server to generate the smallest possible stateless reset
     pair.client.connections.get_mut(&client_ch).unwrap().ping();
     info!("resetting");
@@ -365,7 +370,8 @@ fn client_stateless_reset() {
 
     let mut pair = Pair::new(endpoint_config.clone(), server_config());
     let (_, server_ch) = pair.connect();
-    pair.client.endpoint = Endpoint::new(endpoint_config, Some(Arc::new(server_config())), true);
+    pair.client.endpoint =
+        Endpoint::new(endpoint_config, Some(Arc::new(server_config())), true).unwrap();
     // Send something big enough to allow room for a smaller stateless reset.
     pair.server.connections.get_mut(&server_ch).unwrap().close(
         pair.time,
@@ -527,7 +533,8 @@ fn stateless_reset_limit() {
         endpoint_config.clone(),
         Some(Arc::new(server_config())),
         true,
-    );
+    )
+    .unwrap();
     let time = Instant::now();
     let mut buf = Vec::new();
     let event = endpoint.handle(time, remote, None, None, [0u8; 1024][..].into(), &mut buf);
@@ -2421,7 +2428,7 @@ fn zero_length_cid() {
         || Box::new(RandomConnectionIdGenerator::new(0));
     let mut pair = Pair::new(
         Arc::new(EndpointConfig {
-            connection_id_generator_factory: Arc::new(cid_generator_factory),
+            connection_id_generator_factory: Some(Arc::new(cid_generator_factory)),
             ..EndpointConfig::default()
         }),
         server_config(),
@@ -2481,13 +2488,14 @@ fn cid_rotation() {
     // Only test cid rotation on server side to have a clear output trace
     let server = Endpoint::new(
         Arc::new(EndpointConfig {
-            connection_id_generator_factory: Arc::new(cid_generator_factory),
+            connection_id_generator_factory: Some(Arc::new(cid_generator_factory)),
             ..EndpointConfig::default()
         }),
         Some(Arc::new(server_config())),
         true,
-    );
-    let client = Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+    )
+    .unwrap();
+    let client = Endpoint::new(Arc::new(EndpointConfig::default()), None, true).unwrap();
 
     let mut pair = Pair::new_from_endpoint(client, server);
     let (_, server_ch) = pair.connect();
@@ -3276,7 +3284,8 @@ fn big_cert_and_key() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
 fn malformed_token_len() {
     let _guard = subscribe();
     let client_addr = "[::2]:7890".parse().unwrap();
-    let mut server = Endpoint::new(Default::default(), Some(Arc::new(server_config())), true);
+    let mut server =
+        Endpoint::new(Default::default(), Some(Arc::new(server_config())), true).unwrap();
     let mut buf = Vec::with_capacity(server.config().get_max_udp_payload_size() as usize);
     server.handle(
         Instant::now(),
@@ -3380,12 +3389,13 @@ fn migrate_detects_new_mtu_and_respects_original_peer_max_udp_payload_size() {
         Arc::new(server_endpoint_config),
         Some(Arc::new(server_config())),
         true,
-    );
+    )
+    .unwrap();
     let client_endpoint_config = EndpointConfig {
         max_udp_payload_size: VarInt::from(client_max_udp_payload_size),
         ..EndpointConfig::default()
     };
-    let client = Endpoint::new(Arc::new(client_endpoint_config), None, true);
+    let client = Endpoint::new(Arc::new(client_endpoint_config), None, true).unwrap();
     let mut pair = Pair::new_from_endpoint(client, server);
     pair.mtu = 1300;
 
@@ -4478,10 +4488,10 @@ fn min_mtu_respects_peer_max_udp_payload_size() {
     transport.min_mtu(1452).mtu_discovery_config(None);
     let mut config = server_config();
     config.transport_config(Arc::new(transport));
-    let server = Endpoint::new(Default::default(), Some(Arc::new(config)), true);
+    let server = Endpoint::new(Default::default(), Some(Arc::new(config)), true).unwrap();
     let mut endpoint_config = EndpointConfig::default();
     endpoint_config.max_udp_payload_size(PEER_MAX).unwrap();
-    let client = Endpoint::new(Arc::new(endpoint_config), None, true);
+    let client = Endpoint::new(Arc::new(endpoint_config), None, true).unwrap();
     let mut pair = Pair::new_from_endpoint(client, server);
     let client_ch = pair.begin_connect(client_config());
     pair.drive_client();
@@ -4818,7 +4828,8 @@ fn oversized_datagrams_trigger_unblock() {
 fn reject_short_idcid() {
     let _guard = subscribe();
     let client_addr = "[::2]:7890".parse().unwrap();
-    let mut server = Endpoint::new(Default::default(), Some(Arc::new(server_config())), true);
+    let mut server =
+        Endpoint::new(Default::default(), Some(Arc::new(server_config())), true).unwrap();
     let now = Instant::now();
     let mut buf = Vec::with_capacity(server.config().get_max_udp_payload_size() as usize);
     // Initial header that has an empty DCID but is otherwise well-formed
@@ -4943,7 +4954,7 @@ fn handshake_confirmation_no_resumption_shortcut() {
 fn application_close_in_initial_is_rejected() {
     let _guard = subscribe();
     let server_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 4433);
-    let mut client = Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+    let mut client = Endpoint::new(Arc::new(EndpointConfig::default()), None, true).unwrap();
     let now = Instant::now();
     let (_, mut conn) = client
         .connect(now, client_config(), server_addr, "localhost")

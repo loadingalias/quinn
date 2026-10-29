@@ -592,6 +592,13 @@ pub(crate) fn initial_suite_from_provider(
         .flatten()
 }
 
+// Adapt the configured provider without coupling quinn-proto's core to rustls.
+impl crypto::SecureRandom for &'static dyn rustls::crypto::SecureRandom {
+    fn fill(&self, output: &mut [u8]) -> Result<(), crypto::GetRandomFailed> {
+        rustls::crypto::SecureRandom::fill(*self, output).map_err(|_| crypto::GetRandomFailed)
+    }
+}
+
 pub(crate) fn configured_provider() -> Arc<rustls::crypto::CryptoProvider> {
     #[cfg(all(feature = "rustls-aws-lc-rs", not(feature = "rustls-ring")))]
     let provider = rustls::crypto::aws_lc_rs::default_provider();
